@@ -25,7 +25,7 @@ public class Logica {
 
     }
 
-    public Logica getInstance(){
+    public static Logica getInstance(){
         if (instance == null){
             instance = new Logica();
         }
@@ -126,13 +126,18 @@ public class Logica {
             cq.groupBy(root.get("propertyType"));
 
             Expression<Long> contractQuantity = cb.count(root);
-            Expression<Integer> months = cb.function(
-                    "TIMESTAMPDIFF",
-                    Integer.class,
-                    cb.literal("MONTH"),
-                    root.get("startDate"),
-                    root.get("endDate")
+            Expression<Integer> startYear = cb.function("YEAR", Integer.class, root.get("startDate"));
+            Expression<Integer> endYear = cb.function("YEAR", Integer.class, root.get("endDate"));
+
+            Expression<Integer> startMonth = cb.function("MONTH", Integer.class, root.get("startDate"));
+            Expression<Integer> endMonth = cb.function("MONTH", Integer.class, root.get("endDate"));
+
+// months = (endYear * 12 + endMonth) - (startYear * 12 + startMonth)
+            Expression<Integer> months = cb.diff(
+                    cb.sum(cb.prod(endYear, cb.literal(12)), endMonth),
+                    cb.sum(cb.prod(startYear, cb.literal(12)), startMonth)
             );
+
             Expression<BigDecimal> totalAmount = cb.sum(cb.prod(root.get("monthlyRent"), cb.toBigDecimal(months)));
 
             cq.multiselect(root.get("propertyType").alias("propertyType"), contractQuantity.alias("contractQuantity"), totalAmount.alias("totalAmount"));
@@ -151,7 +156,40 @@ public class Logica {
 
     public List<GetNotFinishedContractsDTO> getNotFinishedContracts(){
         try (Session session = HibernateUtil.getSession()){
+            CriteriaBuilder cb = session.getCriteriaBuilder();
+            CriteriaQuery<RentalContract> cq = cb.createQuery(RentalContract.class);
+            Root<RentalContract> root = cq.from(RentalContract.class);
 
+            Predicate notActiveOrOverdue = cb.or(cb.equal(root.get("status"), StatusEnum.ACTIVE), cb.equal(root.get("status"), StatusEnum.OVERDUE));
+
+            cq.where(notActiveOrOverdue);
+
+            List<RentalContract> rentalContracts = session.createQuery(cq).getResultList();
+
+            List<GetNotFinishedContractsDTO> getNotFinishedContractsDTOS = new ArrayList<>();
+
+            for (RentalContract rentalContract : rentalContracts){
+                CriteriaQuery<RentPayment> cq1 = cb.createQuery(RentPayment.class);
+                Root<RentPayment> root1 = cq1.from(RentPayment.class);
+                Predicate coincidence = cb.equal(root1.get("contractID"), rentalContract);
+                cq1.where(coincidence);
+
+                List<RentPayment> rentPayments = session.createQuery(cq1).getResultList();
+
+                BigDecimal paymentsTotal = BigDecimal.ZERO;
+                for (RentPayment rentPayment : rentPayments){
+                    paymentsTotal = paymentsTotal.add(rentPayment.getAmount());
+                }
+
+                Long months = ChronoUnit.MONTHS.between(rentalContract.getStartDate(), rentalContract.getEndDate());
+
+                BigDecimal contractTotal = rentalContract.getMonthlyRent().multiply(BigDecimal.valueOf(months));
+
+                GetNotFinishedContractsDTO getNotFinishedContractsDTO = new GetNotFinishedContractsDTO(contractTotal, paymentsTotal);
+                getNotFinishedContractsDTOS.add(getNotFinishedContractsDTO);
+            }
+
+            return getNotFinishedContractsDTOS;
         }
     }
 }
